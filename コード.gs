@@ -111,3 +111,126 @@ function processFolder(folderId, sheetName, hubName, dataType, archiveFolderId) 
     Logger.log(fileName + " を【" + hubName + "】用のアーカイブフォルダへ移動しました。");
   }
 }
+// 📧 売上データ（DB）と作業者の気づきを合体させて日報メールを送るメイン関数
+function sendDailyReportMail() {
+  // =================================================================
+  // 【設定エリア】メールの送り先アドレスを指定してください
+  // =================================================================
+  var TO_EMAIL = "honoki@matsujiro.co.jp"; // 👈 メインの送信先
+  var CC_EMAIL = "";     // 👈 Ccのアドレス（なければ "" でOK）
+  // =================================================================
+  
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var today = new Date();
+  var todayStr = Utilities.formatDate(today, "JST", "yyyy/MM/dd");
+  var currentMonthStr = Utilities.formatDate(today, "JST", "yyyy/MM"); // 当月集計用の文字列（例：2026/06）
+  
+  // 各データ蓄積シートの定義
+  var sheetCenter = ss.getSheetByName("データ蓄積_松阪センター");
+  var sheetShop = ss.getSheetByName("データ蓄積_店舗A");
+  
+  // 集計用変数の初期化（すべて0からスタート）
+  var todaySales = 0;
+  var monthSales = 0;
+  var orderCount = 0;
+  var shippingCount = 0;
+  
+  // -----------------------------------------------------------------
+  // 📊 ① 松阪センターシートの集計（A列:日付, C列:金額, F列:受注数, G列:出荷数 と仮定）
+  // -----------------------------------------------------------------
+  if (sheetCenter) {
+    var data = sheetCenter.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      var rowDate = data[i][0];
+      if (!rowDate) continue;
+      
+      // 日付オブジェクト、または文字列を判定してフォーマットを統一
+      var rowDateStr = (rowDate instanceof Date) ? Utilities.formatDate(rowDate, "JST", "yyyy/MM/dd") : rowDate.toString();
+      
+      // 【本日】の集計
+      if (rowDateStr === todayStr) {
+        todaySales += Number(data[i][2] || 0);    // C列：金額
+        orderCount += Number(data[i][5] || 0);    // F列：受注数
+        shippingCount += Number(data[i][6] || 0); // G列：出荷数
+      }
+      // 【当月累計】の集計（年月が一致するもの）
+      if (rowDateStr.indexOf(currentMonthStr) === 0) {
+        monthSales += Number(data[i][2] || 0);
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // 📊 ② 店舗A（本店・おはらい町）シートの集計（A列:日付, C列:金額 と仮定）
+  // -----------------------------------------------------------------
+  if (sheetShop) {
+    var data = sheetShop.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+      var rowDate = data[i][0];
+      if (!rowDate) continue;
+      
+      var rowDateStr = (rowDate instanceof Date) ? Utilities.formatDate(rowDate, "JST", "yyyy/MM/dd") : rowDate.toString();
+      
+      // 【本日】の集計
+      if (rowDateStr === todayStr) {
+        todaySales += Number(data[i][2] || 0); // C列：金額
+        // 店舗側に受注・出荷数がある場合は、該当する列番号を足すロジックを追加してください
+      }
+      // 【当月累計】の集計
+      if (rowDateStr.indexOf(currentMonthStr) === 0) {
+        monthSales += Number(data[i][2] || 0);
+      }
+    }
+  }
+
+  // 昨対比・予算比の計算（※マスタや前年データシートがあれば自動化可能。現在は仮数値を設定）
+  var budgetRatio = "100.0%"; 
+  var YoYRatio = "100.0%"; 
+
+  // -----------------------------------------------------------------
+  // 📝 ③ 【非定型データ】作業者の自由欄（気づき）を取得
+  // -----------------------------------------------------------------
+  var inputSheet = ss.getSheetByName("日報入力");
+  var workerData = "";
+  
+  if (inputSheet) {
+    var rows = inputSheet.getRange(2, 1, 3, 3).getValues(); // 2行目から3名分、3列を取得
+    for (var i = 0; i < rows.length; i++) {
+      var name = rows[i][0];
+      var work = rows[i][1] ? rows[i][1] : "（未入力）";
+      var note = rows[i][2] ? rows[i][2] : "（未入力）";
+      
+      if (!name) continue; // 名前が空欄ならスキップ
+      
+      workerData += "#### 👤 " + name + "\n" +
+                    "* **本日の作業内容：**\n  " + work + "\n" +
+                    "* **気づき・コメント：**\n  " + note + "\n\n";
+    }
+  } else {
+    workerData = "※「日報入力」シートが見つからないため、自由欄をスキップしました。\n\n";
+  }
+  
+  // -----------------------------------------------------------------
+  // ✉️ ④ メール本文（テキスト形式）の組み立てと送信
+  // -----------------------------------------------------------------
+  var subject = "【売上・業務日報】" + todayStr + " 全社速報";
+  
+  var body = "関係者各位\n\nお疲れ様です。本日の売上、および業務状況を報告いたします。\n\n" +
+             "### 📊 1. 本日の業績速報（定型データ）\n" +
+             "・本日売上高： ¥" + todaySales.toLocaleString() + " (昨対比: " + YoYRatio + " / 予算比: " + budgetRatio + ")\n" +
+             "・当月累計売上： ¥" + monthSales.toLocaleString() + "\n" +
+             "・本日受注数： " + orderCount + " 件 / 本日出荷数： " + shippingCount + " 件\n\n" +
+             "---\n\n" +
+             "### 📝 2. 現場の作業内容・気づき（自由欄）\n\n" + workerData +
+             "以上、よろしくお願いいたします。";
+             
+  // メールの実際の送信処理
+  MailApp.sendEmail({
+    to: TO_EMAIL,
+    cc: CC_EMAIL,
+    subject: subject,
+    body: body
+  });
+  
+  Logger.log(todayStr + " の日報メールの自動集計・送信が完了しました！");
+}
